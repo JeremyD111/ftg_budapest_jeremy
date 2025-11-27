@@ -18,6 +18,7 @@ from nav_msgs.msg import Odometry
 # Mensajes para publicar info de vueltas/tiempos (texto simple)
 from std_msgs.msg import String
 
+
 class ReactiveFollowGap(Node):
     def __init__(self):
     
@@ -39,11 +40,11 @@ class ReactiveFollowGap(Node):
             AckermannDriveStamped, "/drive", 10
         )
         
-        # Publicador para información de vueltas/tiempos (para mostrar en pantalla / grabar video)
+        # Publicador para información de vueltas/tiempos 
         self.lap_pub = self.create_publisher(String, "/lap_info", 10)
 
 
-        # --- Parámetros ajustados para Budapest ---
+# --- Parámetros ajustados para Budapest ---
         
         # Zona que se anula al rededor del obs mas cercano
         self.bubble_radius_m = 1.32
@@ -60,18 +61,9 @@ class ReactiveFollowGap(Node):
         # Tope maximo (rad) que permites para la direccion (giro)           
         self.max_steering = 0.15
 
-        # velocidades según giro:
-        # Recta
-        self.speed_straight = 5.0
-        # Curva
-        self.speed_turn = 1.1
-        # Curva fuerte
-        self.speed_hard_turn = 1.5
 
+# --- Parámetros para conteo de vueltas / cronómetro ---
 
-        # ---------------------------
-        # Parámetros para conteo de vueltas / cronómetro
-        # ---------------------------
         # Radios para la "zona de inicio/finish": (m)
         self.entry_radius = 1.0   # al entrar dentro -> posible conteo
         self.exit_radius = 1.5    # debe primero salir del área para armar el siguiente conteo
@@ -86,6 +78,9 @@ class ReactiveFollowGap(Node):
         self.last_lap_time = None        # tiempo de la última vuelta
         self.lap_times = []              # lista de tiempos por vuelta
         self.lap_count = 0
+        
+        self.best_lap_time = None # Inicializar el mejor tiempo como None o float('inf')
+        self.MAX_LAPS = 10        # Definir el límite de vueltas
 
         # Flag para saber si recibimos odom
         self.odom_received = False
@@ -96,56 +91,63 @@ class ReactiveFollowGap(Node):
 
 # --- Suavizar LiDAR ---
     def preprocess(self, ranges):
-    
+    	
+         # Convertir a Array
          r = np.array(ranges)
 
+	 # Corregir fallos de lectura 
+	 # Rango max para que el filtro no los arrastre a 0 
          r[r == 0] = self.max_range
 
+	 # Limita los valores al rango max del LIDAR definido 
          r[r > self.max_range] = self.max_range
 
+	 # Array de tamaño kernell=3 de "unos"/kernell
          kernel = np.ones(self.smoothing_kernel) / self.smoothing_kernel
 
+	 # Cada dato se convierte en el promedio de si mismo y sus vecinos 
          return np.convolve(r, kernel, mode="same") 
-    	# transformo la lista en array
-        #proc_ranges = np.array(ranges)
-        
-        # Filtro(suaviza) los datos: Cada punto es el prom de los 5 vecinos
-        #proc_ranges = np.convolve(proc_ranges, np.ones(3)/3, mode='same') 
-        
-        # Valores muy grandes = rango max del lidar 
-        #proc_ranges[proc_ranges > self.max_range] = self.max_range  
-        #return proc_ranges
-    	
+
 
 # --- Encontrar el gap más grande ---
     def find_largest_gap(self, free_space):
+    
+    	# Lista 
         gaps = []
         start = None
+        
+        # Recorre array de espacio libre (1=indice) (v=distancia)
         for i, v in enumerate(free_space):
+        
+            # Si hay espacio libre 
             if v > 0 and start is None:
+            	# comienza el gap
                 start = i
+                
+            # Si hay obstaculo 
             elif v == 0 and start is not None:
-                gaps.append((start, i - 1))
-                start = None
+                gaps.append((start, i - 1))   #crea el gap como tupla
+                start = None  		      #resetea el start
+        
+        # Por si termina con un gap abierto
         if start is not None:
             gaps.append((start, len(free_space)-1))
 
+	# Devuelve gap mas grande: Restando el tamaño del gap
         return max(gaps, key=lambda g: g[1]-g[0])
 
 
 # --- Mejor punto dentro del gap ---
     def select_best_point(self, gap, ranges):
-        start, end = gap
+        start, end = gap	#indices de inicio y fin
+        
+        #Indice global del array Ranges(LIdar) que tiene el valor MAX
         return start + np.argmax(ranges[start:end+1])
     
     
     
 # --- Control de velocidad basado en distancia libre ---
     def compute_adaptive_speed(self, free_dist):
-        """
-        free_dist: distancia libre hacia el gap en metros
-        return: velocidad recomendada en m/s
-        """
 
         # Tramos de distancia (ajústalos según Budapest)
         d1 = 1.2
@@ -190,6 +192,7 @@ class ReactiveFollowGap(Node):
         start = max(0, closest - bubble_radius_idx)
         end = min(len(ranges) - 1, closest + bubble_radius_idx)
 
+	# Copia los valores suavizados 
         free_space = np.copy(ranges)
         free_space[start:end+1] = 0
 
@@ -206,41 +209,20 @@ class ReactiveFollowGap(Node):
 
 
         # 5. Convertir a ángulo
-        #angle = msg.angle_min + best_point* msg.angle_increment
-        #angle *= self.steering_gain
-        #angle = np.clip(angle, -self.max_steering, self.max_steering)
-        
         angle = msg.angle_min + best_point* msg.angle_increment
         angle = np.clip(angle, -self.max_steering, self.max_steering)
         
 
-        # 6. Ajustar velocidad según giro
-#        abs_ang = abs(angle)
- #       if abs_ang > 0.28:
-  #          speed = self.speed_hard_turn
-   #     elif abs_ang > 0.15:
-    #        speed = self.speed_turn
-     #   else:
-      #      speed = self.speed_straight
-
         # Ajustar velocidad con base en distancia libre
         speed = adaptive_speed
 
-        # 7. Publicar movimiento
+        # 6. Publicar movimiento
         drive_msg = AckermannDriveStamped()
         drive_msg.drive.steering_angle = float(angle)
         drive_msg.drive.speed = float(speed)
-        self.drive_pub.publish(drive_msg)
-
-        #self.get_logger().info(
-  #          f"Gap {largest_gap}, target {best_point}, angle {angle:.3f}, speed {speed:.2f}"
-   #     )
+        self.drive_pub.publish(drive_msg) 
         
         
-        
-        
-        
-
 
 
 # También podemos emitir el estado de vueltas periódicamente
@@ -251,11 +233,12 @@ class ReactiveFollowGap(Node):
             msg.data = lap_summary
             self.lap_pub.publish(msg)
         else:
+            pass
             # advertencia no invasiva (solo la primera vez)
-            self.get_logger().warn("No /odom received yet — lap counter inactive.")
+            #self.get_logger().warn("No /odom received yet — lap counter inactive.")
 
 
-    # --- Callback de Odometry — usado para conteo de vueltas ---
+# --- Callback de Odometry — usado para conteo de vueltas ---
     def odom_callback(self, odom_msg):
         # extraer posición x,y del odom
         x = odom_msg.pose.pose.position.x
@@ -297,12 +280,32 @@ class ReactiveFollowGap(Node):
                     self.last_lap_time = lap_time
                     self.lap_times.append(lap_time if lap_time is not None else 0.0)
 
-                    # publicar info clara (útil para hacer el video evidenciando cronómetro)
-                    info = f"LAP {self.lap_count} completed — time: {lap_time:.3f} s"
+
+                    # --- NUEVA LÍNEA 1: Actualizar el Mejor Tiempo ---
+                    if self.best_lap_time is None or lap_time < self.best_lap_time:
+                        self.best_lap_time = lap_time
+                    
+                    
+                    # publicar info clara 
+                    info = f"VUELTA {self.lap_count} completada — time: {lap_time:.3f} s"
                     self.get_logger().info(info)
                     msg = String()
                     msg.data = info
                     self.lap_pub.publish(msg)
+                    
+                    
+                    # --- NUEVO BLOQUE 2: Reporte final de 10 vueltas ---
+                    if self.lap_count >= self.MAX_LAPS:
+                        final_info = (f"COMPETENCIA FINALIZADA ({self.MAX_LAPS} vueltas). "
+                                  f"🏆 Mejor tiempo: {self.best_lap_time:.3f} s")
+                        self.get_logger().info("##################################################")
+                        self.get_logger().info(final_info)
+                        self.get_logger().info("##################################################")
+                        # Opcional: Desuscribirse del odom para detener el conteo
+                        # self.odom_sub.destroy()
+                    # --------------------------------------------------
+                    
+                    
 
                     # reiniciar timers para la siguiente vuelta
                     self.lap_start_time = now_s
@@ -323,13 +326,6 @@ class ReactiveFollowGap(Node):
             "last_lap_time": self.last_lap_time
         }
 
-    
-    
-    
-    
-    
-    
-        
 
 
 def main(args=None):
